@@ -72,9 +72,9 @@ def get_weather(city_name):
         "city": live_data["city"],
         "weather": full_weather,
         "rain_snow": rain_snow_status,
-        "temp": live_data["temperature"],
-        "min_temp": today_forecast["nighttemp"],
+        "temp_str": f"{live_data['temperature']}℃（今日 {today_forecast['nighttemp']}℃ ~ {today_forecast['daytemp']}℃）",
         "max_temp": today_forecast["daytemp"],
+        "min_temp": today_forecast["nighttemp"],
         "wind": f"{live_data['winddirection']}风 {live_data['windpower']}级"
     }
 
@@ -97,7 +97,6 @@ def get_access_token():
     res = requests.get(url).json()
     if "access_token" not in res:
         print(f"❌ 微信获取 Token 失败！返回信息：{res}")
-        print("💡 排查建议：请检查 Secrets 里的 APP_ID 和 APP_SECRET 是否与微信测试号后台完全一致！")
         sys.exit(1)
     return res.get("access_token")
 
@@ -119,13 +118,12 @@ def send_wechat():
             "touser": uid,
             "template_id": TEMPLATE_ID,
             "data": {
+                "title": {"value": "敏今日份天气提醒"},
                 "date": {"value": today_str},
                 "city": {"value": weather_info["city"]},
                 "weather": {"value": weather_info["weather"]},
                 "rain_snow": {"value": weather_info["rain_snow"]},
-                "temp": {"value": weather_info["temp"]},
-                "min_temp": {"value": weather_info["min_temp"]},
-                "max_temp": {"value": weather_info["max_temp"]},
+                "temp": {"value": weather_info["temp_str"]},
                 "wind": {"value": weather_info["wind"]},
                 "tips": {"value": tips}
             }
@@ -135,7 +133,6 @@ def send_wechat():
             print(f"✅ 成功发送给微信用户 {uid}！")
         else:
             print(f"❌ 微信推送失败！返回信息：{res}")
-            print("💡 排查建议：请检查 USER_ID（是不是以 o 开头的那串微信号）和 TEMPLATE_ID 是否填对！")
             sys.exit(1)
 
 if __name__ == "__main__":
