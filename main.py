@@ -3,7 +3,7 @@ import sys
 import requests
 import datetime
 
-# 读取环境变量并自动去除不小心多复制的空格或换行
+# 读取环境变量并自动去除空格
 APP_ID = (os.environ.get("APP_ID") or "").strip()
 APP_SECRET = (os.environ.get("APP_SECRET") or "").strip()
 USER_ID = (os.environ.get("USER_ID") or "").strip()
@@ -11,18 +11,35 @@ TEMPLATE_ID = (os.environ.get("TEMPLATE_ID") or "").strip()
 AMAP_KEY = (os.environ.get("AMAP_KEY") or "").strip()
 CITY = (os.environ.get("CITY") or "").strip() or "北京市"
 
+def resolve_adcode(address_str):
+    """当直接用长地址查不到天气时，自动解析详细地址所属的区县编码(adcode)"""
+    geo_url = f"https://restapi.amap.com/v3/geocode/geo?key={AMAP_KEY}&address={address_str}"
+    res = requests.get(geo_url).json()
+    if res.get("status") == "1" and res.get("geocodes"):
+        adcode = res["geocodes"][0].get("adcode")
+        district = res["geocodes"][0].get("district") or res["geocodes"][0].get("city")
+        print(f"📍 已自动将详细地址【{address_str}】定位到所属区域：【{district}】(编码: {adcode})")
+        return adcode
+    return address_str
+
 def get_weather(city_name):
     print(f"👉 正在查询【{city_name}】的天气...")
-    live_url = f"https://restapi.amap.com/v3/weather/weatherInfo?key={AMAP_KEY}&city={city_name}&extensions=base"
-    forecast_url = f"https://restapi.amap.com/v3/weather/weatherInfo?key={AMAP_KEY}&city={city_name}&extensions=all"
+    query_target = city_name
     
+    live_url = f"https://restapi.amap.com/v3/weather/weatherInfo?key={AMAP_KEY}&city={query_target}&extensions=base"
     live_res = requests.get(live_url).json()
+    
+    # 如果因为填了学校/详细地址导致 lives 为空，自动解析所在区县再查一次
+    if live_res.get("status") == "1" and not live_res.get("lives"):
+        query_target = resolve_adcode(city_name)
+        live_url = f"https://restapi.amap.com/v3/weather/weatherInfo?key={AMAP_KEY}&city={query_target}&extensions=base"
+        live_res = requests.get(live_url).json()
+
+    forecast_url = f"https://restapi.amap.com/v3/weather/weatherInfo?key={AMAP_KEY}&city={query_target}&extensions=all"
     forecast_res = requests.get(forecast_url).json()
     
-    # 检查高德 Key 是否报错
     if live_res.get("status") != "1" or not live_res.get("lives"):
         print(f"❌ 高德实时天气接口报错！返回信息：{live_res}")
-        print("💡 排查建议：1. 请检查 AMAP_KEY 是否复制正确；2. 在高德后台添加 Key 时，服务平台必须选【Web服务】（不能选 Web端 JS API）；3. 检查 CITY 变量是否是有效的中文城市/区县名。")
         sys.exit(1)
 
     if forecast_res.get("status") != "1" or not forecast_res.get("forecasts"):
