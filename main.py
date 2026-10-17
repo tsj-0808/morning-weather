@@ -1,24 +1,34 @@
 import os
+import sys
 import requests
 import datetime
 
-# 从 GitHub 环境变量读取配置
-APP_ID = os.environ.get("APP_ID")
-APP_SECRET = os.environ.get("APP_SECRET")
-USER_ID = os.environ.get("USER_ID")
-TEMPLATE_ID = os.environ.get("TEMPLATE_ID")
-AMAP_KEY = os.environ.get("AMAP_KEY")
-CITY = os.environ.get("CITY", "北京市")
+# 读取环境变量并自动去除不小心多复制的空格或换行
+APP_ID = (os.environ.get("APP_ID") or "").strip()
+APP_SECRET = (os.environ.get("APP_SECRET") or "").strip()
+USER_ID = (os.environ.get("USER_ID") or "").strip()
+TEMPLATE_ID = (os.environ.get("TEMPLATE_ID") or "").strip()
+AMAP_KEY = (os.environ.get("AMAP_KEY") or "").strip()
+CITY = (os.environ.get("CITY") or "").strip() or "北京市"
 
 def get_weather(city_name):
-    # 获取高德实时天气
+    print(f"👉 正在查询【{city_name}】的天气...")
     live_url = f"https://restapi.amap.com/v3/weather/weatherInfo?key={AMAP_KEY}&city={city_name}&extensions=base"
-    # 获取高德全天预报天气（包含白天、夜间天气及最高最低温）
     forecast_url = f"https://restapi.amap.com/v3/weather/weatherInfo?key={AMAP_KEY}&city={city_name}&extensions=all"
     
     live_res = requests.get(live_url).json()
     forecast_res = requests.get(forecast_url).json()
     
+    # 检查高德 Key 是否报错
+    if live_res.get("status") != "1" or not live_res.get("lives"):
+        print(f"❌ 高德实时天气接口报错！返回信息：{live_res}")
+        print("💡 排查建议：1. 请检查 AMAP_KEY 是否复制正确；2. 在高德后台添加 Key 时，服务平台必须选【Web服务】（不能选 Web端 JS API）；3. 检查 CITY 变量是否是有效的中文城市/区县名。")
+        sys.exit(1)
+
+    if forecast_res.get("status") != "1" or not forecast_res.get("forecasts"):
+        print(f"❌ 高德预报天气接口报错！返回信息：{forecast_res}")
+        sys.exit(1)
+        
     live_data = live_res["lives"][0]
     today_forecast = forecast_res["forecasts"][0]["casts"][0]
     
@@ -26,13 +36,11 @@ def get_weather(city_name):
     day_weather = today_forecast["dayweather"]
     night_weather = today_forecast["nightweather"]
     
-    # 组合全天天气描述（如：晴转多云，当前晴）
     if day_weather == night_weather:
         full_weather = f"{day_weather}（实时：{live_weather}）"
     else:
         full_weather = f"{day_weather}转{night_weather}（实时：{live_weather}）"
 
-    # 判断全天（实时 + 白天 + 夜间）是否下雨或下雪
     all_weather_str = f"{live_weather}{day_weather}{night_weather}"
     if "雨" in all_weather_str and "雪" in all_weather_str:
         rain_snow_status = f"🌨️ 今日有雨雪（白天{day_weather}/夜间{night_weather}），务必带伞防滑！"
@@ -69,13 +77,17 @@ def generate_tips(rain_snow, max_temp, min_temp):
 
 def get_access_token():
     url = f"https://api.weixin.qq.com/cgi-bin/token?grant_type=client_credential&appid={APP_ID}&secret={APP_SECRET}"
-    return requests.get(url).json().get("access_token")
+    res = requests.get(url).json()
+    if "access_token" not in res:
+        print(f"❌ 微信获取 Token 失败！返回信息：{res}")
+        print("💡 排查建议：请检查 Secrets 里的 APP_ID 和 APP_SECRET 是否与微信测试号后台完全一致！")
+        sys.exit(1)
+    return res.get("access_token")
 
 def send_wechat():
     weather_info = get_weather(CITY)
     tips = generate_tips(weather_info["rain_snow"], weather_info["max_temp"], weather_info["min_temp"])
     
-    # 强制转换为北京时间 (UTC+8)
     tz = datetime.timezone(datetime.timedelta(hours=8))
     today_str = datetime.datetime.now(tz).strftime("%Y年%m月%d日")
     
@@ -83,8 +95,11 @@ def send_wechat():
     send_url = f"https://api.weixin.qq.com/cgi-bin/message/template/send?access_token={token}"
     
     for uid in USER_ID.split(","):
+        uid = uid.strip()
+        if not uid:
+            continue
         payload = {
-            "touser": uid.strip(),
+            "touser": uid,
             "template_id": TEMPLATE_ID,
             "data": {
                 "date": {"value": today_str},
@@ -99,7 +114,12 @@ def send_wechat():
             }
         }
         res = requests.post(send_url, json=payload).json()
-        print(f"Send to {uid}: {res}")
+        if res.get("errcode") == 0:
+            print(f"✅ 成功发送给微信用户 {uid}！")
+        else:
+            print(f"❌ 微信推送失败！返回信息：{res}")
+            print("💡 排查建议：请检查 USER_ID（是不是以 o 开头的那串微信号）和 TEMPLATE_ID 是否填对！")
+            sys.exit(1)
 
 if __name__ == "__main__":
     send_wechat()
