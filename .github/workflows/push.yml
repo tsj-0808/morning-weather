@@ -1,0 +1,31 @@
+name: Daily Weather Push
+
+on:
+  workflow_dispatch: # 支持手动点击按钮立即测试推送
+  schedule:
+    - cron: '15 23 * * *' # 每天北京时间早上 07:15 自动触发
+
+jobs:
+  push_weather:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+
+      - name: Install dependencies
+        run: pip install requests
+
+      - name: Run script
+        env:
+          APP_ID: ${{ secrets.APP_ID }}
+          APP_SECRET: ${{ secrets.APP_SECRET }}
+          USER_ID: ${{ secrets.USER_ID }}
+          TEMPLATE_ID: ${{ secrets.TEMPLATE_ID }}
+          AMAP_KEY: ${{ secrets.AMAP_KEY }}
+          CITY: ${{ vars.CITY }}
+        run: python main.py
