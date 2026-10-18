@@ -31,17 +31,13 @@ def get_beijing_now():
 
 
 def post_json_utf8(url, data_dict):
-    """
-    核心修复：强制使用 UTF-8 原始字节流传输，关闭 ensure_ascii 转义
-    彻底根除 \\ud83c、\\u4eca 等 ASCII 字符乱码
-    """
+    """强制使用 UTF-8 编码，防止手机端产生 \\ud83c 乱码"""
     headers = {"Content-Type": "application/json; charset=utf-8"}
     json_bytes = json.dumps(data_dict, ensure_ascii=False).encode("utf-8")
     return requests.post(url, data=json_bytes, headers=headers, timeout=10).json()
 
 
 def resolve_location(address, amap_key):
-    """解析经纬度与行政区划"""
     clean_addr = address.strip()
     geo_url = "https://restapi.amap.com/v3/geocode/geo"
     try:
@@ -76,7 +72,6 @@ def resolve_location(address, amap_key):
 
 
 def get_amap_weather(adcode, amap_key):
-    """获取高德实况与基础预报"""
     url = "https://restapi.amap.com/v3/weather/weatherInfo"
     live_data, cast_data = {}, {}
     try:
@@ -95,7 +90,6 @@ def get_amap_weather(adcode, amap_key):
 
 
 def get_hourly_precision_weather(lon, lat):
-    """逐小时气象融合纠偏"""
     url = "https://api.open-meteo.com/v1/forecast"
     params = {
         "latitude": lat,
@@ -108,32 +102,54 @@ def get_hourly_precision_weather(lon, lat):
     try:
         return requests.get(url, params=params, timeout=12).json()
     except Exception as e:
-        print(f"高精度逐小时气象获取异常: {e}")
+        print(f"高精度气象获取异常: {e}")
         return None
 
 
-def summarize_period_weather(codes, pops, precips):
+def is_valid_rain(code, pop, precip, is_dry_sunny):
+    """
+    严谨过滤假雨逻辑：
+    1. 正常需要降水概率 >= 60% 且小时雨量 >= 0.8mm
+    2. 如果当前属于晴热干燥（实况晴 + >=28℃ + 湿度<=65%），进一步要求 >= 70% 且雨量 >= 1.5mm
+    """
+    w_text = WMO_CODE_MAP.get(code, "多云")
+    if "雨" not in w_text and "雪" not in w_text:
+        return False, w_text
+
+    if is_dry_sunny:
+        if pop >= 70 and precip >= 1.5:
+            return True, w_text
+        return False, "多云" if code == 2 else "晴"
+
+    if pop >= 60 and precip >= 0.8:
+        return True, w_text
+    return False, "多云" if code == 2 else "晴"
+
+
+def summarize_period_weather(codes, pops, precips, is_dry_sunny):
     rain_hours = []
     clear_count, cloud_count, overcast_count = 0, 0, 0
+
     for code, pop, precip in zip(codes, pops, precips):
-        w_text = WMO_CODE_MAP.get(code, "多云")
-        if ("雨" in w_text or "雪" in w_text) and (pop >= 35 and precip >= 0.25):
-            rain_hours.append(w_text)
+        has_rain, mapped_text = is_valid_rain(code, pop, precip, is_dry_sunny)
+        if has_rain:
+            rain_hours.append(mapped_text)
         else:
-            if code in (0, 1):
+            if mapped_text == "晴" or code in (0, 1):
                 clear_count += 1
-            elif code == 2:
+            elif mapped_text == "多云" or code == 2:
                 cloud_count += 1
             else:
                 overcast_count += 1
 
     if rain_hours:
         return max(set(rain_hours), key=rain_hours.count)
+
     total = max(len(codes), 1)
-    if clear_count / total >= 0.5:
+    if clear_count / total >= 0.45:
         return "晴"
     elif (clear_count + cloud_count) / total >= 0.6:
-        return "多云" if cloud_count >= clear_count else "晴"
+        return "多云"
     else:
         return "阴"
 
@@ -145,13 +161,18 @@ def build_accurate_weather(city_input, amap_key):
 
     live_weather = live.get("weather", "晴")
     live_temp = live.get("temperature")
-    wind_dir = live.get("winddirection") or cast.get("daywind") or "微"
-    wind_power = live.get("windpower") or cast.get("daypower") or "2"
+    humidity_val = int(live.get("humidity", 55)) if str(live.get("humidity", "")).isdigit() else 55
+    wind_dir = live.get("winddirection") or cast.get("daywind") or "西"
+    wind_power = live.get("windpower") or cast.get("daypower") or "3"
 
     amap_day_w = cast.get("dayweather", live_weather)
     amap_night_w = cast.get("nightweather", live_weather)
     amap_max_t = cast.get("daytemp")
     amap_min_t = cast.get("nighttemp")
+
+    # 判断实况是否为晴热干燥状态
+    curr_temp_raw = float(live_temp) if (live_temp and str(live_temp).replace(".", "", 1).isdigit()) else 28.0
+    is_dry_sunny = (live_weather == "晴" and curr_temp_raw >= 27.5 and humidity_val <= 65)
 
     rain_hours_list = []
 
@@ -162,31 +183,19 @@ def build_accurate_weather(city_input, amap_key):
         h_precips = [p if p is not None else 0.0 for p in hourly.get("precipitation", [])[:24]]
         h_temps = [t for t in hourly.get("temperature_2m", [])[:24] if t is not None]
 
-        om_curr = om_data.get("current", {})
-        om_curr_temp = om_curr.get("temperature_2m")
-        om_curr_w = WMO_CODE_MAP.get(om_curr.get("weather_code", 0), "晴")
+        curr_temp = int(round(curr_temp_raw))
+        real_live_weather = live_weather
 
-        if live_temp is not None:
-            curr_temp = int(round(float(live_temp)))
-        elif om_curr_temp is not None:
-            curr_temp = int(round(float(om_curr_temp)))
-        else:
-            curr_temp = 25
+        # 白天 (07:00 - 19:00) 与 夜间 (19:00 - 24:00) 天气判定
+        day_weather = summarize_period_weather(h_codes[7:19], h_pops[7:19], h_precips[7:19], is_dry_sunny)
+        night_weather = summarize_period_weather(h_codes[19:24], h_pops[19:24], h_precips[19:24], is_dry_sunny)
 
-        morning_codes = h_codes[8:13]
-        if live_weather in ("多云", "阴") and om_curr_w == "晴" and morning_codes.count(0) + morning_codes.count(1) >= 3:
-            real_live_weather = "晴"
-        else:
-            real_live_weather = live_weather
-
-        day_weather = summarize_period_weather(h_codes[7:19], h_pops[7:19], h_precips[7:19])
-        night_weather = summarize_period_weather(h_codes[19:24], h_pops[19:24], h_precips[19:24])
-
+        # 检查全天是否有达到真实降雨级别的时段
         for hr in range(7, 24):
             if hr < len(h_codes):
-                w_str = WMO_CODE_MAP.get(h_codes[hr], "")
-                if ("雨" in w_str or "雪" in w_str) and h_pops[hr] >= 35 and h_precips[hr] >= 0.25:
-                    rain_hours_list.append((hr, w_str))
+                has_rain, r_str = is_valid_rain(h_codes[hr], h_pops[hr], h_precips[hr], is_dry_sunny)
+                if has_rain:
+                    rain_hours_list.append((hr, r_str))
 
         candidates_max = [curr_temp]
         candidates_min = [curr_temp]
@@ -198,30 +207,32 @@ def build_accurate_weather(city_input, amap_key):
         if amap_min_t and str(amap_min_t).lstrip("-").isdigit():
             candidates_min.append(int(amap_min_t))
 
-        calc_max = int(round(sum(candidates_max[1:]) / len(candidates_max[1:]))) if len(candidates_max) > 1 else curr_temp
-        calc_min = int(round(sum(candidates_min[1:]) / len(candidates_min[1:]))) if len(candidates_min) > 1 else curr_temp
+        calc_max = int(round(max(candidates_max)))
+        calc_min = int(round(min(candidates_min)))
         max_temp = max(calc_max, curr_temp)
         min_temp = min(calc_min, curr_temp)
     else:
-        curr_temp = int(live_temp) if (live_temp and str(live_temp).lstrip("-").isdigit()) else 25
+        curr_temp = int(curr_temp_raw)
         max_temp = max(int(amap_max_t) if amap_max_t else curr_temp, curr_temp)
         min_temp = min(int(amap_min_t) if amap_min_t else curr_temp, curr_temp)
         real_live_weather = live_weather
-        day_weather = amap_day_w
-        night_weather = amap_night_w
+        day_weather = "晴" if is_dry_sunny else amap_day_w
+        night_weather = "多云" if is_dry_sunny else amap_night_w
 
+    # 如果白天是晴天，夜间是多云或晴，直接统称为“晴”或“晴转多云”
     if day_weather == night_weather:
         weather_summary = f"{day_weather} (实时: {real_live_weather})"
     else:
         weather_summary = f"{day_weather}转{night_weather} (实时: {real_live_weather})"
 
+    # 雨雪提醒
     if rain_hours_list:
         start_h = rain_hours_list[0][0]
         end_h = rain_hours_list[-1][0] + 1
         r_type = rain_hours_list[0][1]
         rain_snow_msg = f"{start_h}-{end_h}时有{r_type}，出门请带伞"
-    elif "雨" in real_live_weather or "雪" in real_live_weather:
-        rain_snow_msg = f"当前正在下{real_live_weather}，出门一定带伞"
+    elif "雨" in real_live_weather:
+        rain_snow_msg = "当前有降雨，出门一定带伞"
     else:
         rain_snow_msg = "今日全天无雨雪，可放心出门~"
 
@@ -282,7 +293,7 @@ def send_wechat_push(token, user_id, template_id, w_info):
     now_bj = get_beijing_now()
     date_str = f"{now_bj.year}年{now_bj.month}月{now_bj.day}日"
 
-    # 1. 采用 UTF-8 编码发送【图文大卡片】
+    # 1. 采用 UTF-8 发送图文封面大卡片
     custom_url = f"https://api.weixin.qq.com/cgi-bin/message/custom/send?access_token={token}"
     news_payload = {
         "touser": user_id,
@@ -304,7 +315,7 @@ def send_wechat_push(token, user_id, template_id, w_info):
     except Exception as e:
         print(f"图文推送跳过: {e}")
 
-    # 2. 采用 UTF-8 编码发送【模板消息卡片】
+    # 2. 采用 UTF-8 发送标准模板消息卡片
     tpl_url = f"https://api.weixin.qq.com/cgi-bin/message/template/send?access_token={token}"
     tpl_payload = {
         "touser": user_id,
@@ -332,7 +343,7 @@ def main():
         sys.exit(1)
 
     weather_info = build_accurate_weather(CITY_NAME, AMAP_KEY)
-    print("今日推送纯净数据：", weather_info)
+    print("今日校准后纯净数据：", weather_info)
 
     token = get_wechat_token(APP_ID, APP_SECRET)
     for uid in [u.strip() for u in USER_ID.split(",") if u.strip()]:
